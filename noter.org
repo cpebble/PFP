@@ -131,3 +131,258 @@ I kind of zoned out here. Futhark goes wheeee
 			(d: i32) : [n][m]i32 =
     map (\cs -> map (\c -> divergence c d) cs) css
 #+END_SRC
+* 18/11 Cost models and advanced Futhark programming
+** Cost models
+Why?  
+Which is better
+#+BEGIN_SRC python
+  def inc_scalar(x):
+      for i in range(len(x)):
+	  x[i] = x[i] + 1
+  def inc_par(x):
+      return x + np.ones(x.shape)
+#+END_SRC
+The second one, but why? "More parallel" isn't a viable judgement  
+
+
+Looking at the first function, we get this Diagram:  
+=len(x) -> range () -> (x[0], 1) -> x[0] = ... + ... -> ... -> x[n-1] = x[n-1] + 1=
+
+Total count of nodes is the work W(p), the span is $n$(there are n iterations)
+The length of the longest path from root to leaf is the span  
+With an infinite number of processors, if a program $p$ has the span $k$
+written $S(p) = k$, the program can execute in $O(k)$ time.  
+Here $W(p) = O(n), S(p) = O(n)$  
+
+Looking at the second function:  
+=x.shape -> np.ones() = (np.ones(0), ..., np.ones(n-1)) -> return x + ...=
+The work is O(n), the span is O(1)  
+W(p) = O(n)  
+S(p) = O(1)  
+
+For infinite processors, this would execute in constant time
+
+*** Brents theorem
+In practice, we don't have infinite processors.  
+The intuition is. If we only have x processors, we can simulate the infinite
+processors, by chunking the parallel steps. This gives us an overhead
+that is defined by the amount of missing processors
+
+Writing $T_i$ for the time taken to execute an algorithm on $i$
+processors, Brent's theorem states that
+\[ \frac{T_1}{p} \leq T_p \leq T_{\infty} ... \] 
+
+*** language based
+Instead of counting levels in a dag, we use a language-based cost model.  
+E.g W(x+y) is defined as W(x) + W(y)
+
+*** Language based cost model for futhark-lang
+/We write [e] for the result of evaluating expression /e/
+
+Simple case
+#+BEGIN_SRC 
+W(v) = 1
+S(v) = 1
+W(e1 op e2) = W(e1) + W(e2) + 1
+// This could be MaX(W(e1) + W(e2)) if we had a guarantee it would be parallel
+S(e1 op e2) = S(e1) + S(e2) + 1
+W(\x -> e) = 1 // just creating a lambda
+S(\x -> e) = 1
+
+W([e_1, ..., e_n]) = W(e_1) + ... + W(e_n) + 1 // array lit
+S([e_1, ..., e_n]) = S(e_1) + ... + S(e_n) + 1 
+W((e_1, ..., e_n)) = W(e_1) + ... + W(e_n) + 1 // Tuple lit
+S((e_1, ..., e_n)) = S(e_1) + ... + S(e_n) + 1 
+
+#+END_SRC
+If W = S, it implies no parallelism is guaranteed
+
+Interesting cases:
+#+BEGIN_SRC 
+W(iota e) = W(e) + [e]
+S(iota e) = S(e) + 1 // Implies parallel
+
+W(let x = e in e') = W(e) + W(e'[x->[e]]) + 1
+S(let x = e in e') = S(e) + S(e'[x->[e]]) + 1 // No paralllelism
+// also tells us that e is fully evaluated before the body
+
+// Long and weird. Depends on evaluating e2 first, then e1
+W(e1 e2) = 
+S(e1 e2) =
+
+// Map is parallel, but is slowed by the longest function application
+W(map e1 e2) = W(e1) + W(e2) + W(e'[x->v1]) + ... + W(e'[x->vn])
+S(map e1 e2) = S(e1) + S(e1) + MAX(s(e'[x->v1]) + ... + W(e'[x->vn])
+#+END_SRC 
+
+**** Using this, reduction by contraction
+#+BEGIN_SRC futhark
+  let npow2 (n:i64) : i64 =
+    loop a = 2 while a < n do 2*a
+
+  let padpow2 [n] (ne: i32) (v:[n]i32) : []i32 =
+    concat v (replicate (npow2 n - n) ne)
+
+  let red (xs : []i32) : i32 =
+    let xs =
+      loop xs = padpow2 0 xs
+      while length xs > 1 do
+      let n = length xs / 2
+      in map2 (+) xs[0:n] xs[n:2*n]
+    in xs[0]
+#+END_SRC
+What is the Work of loop?
+#+BEGIN_SRC 
+W(loop x = e_1 while e2 do e3) =
+    W(e1) + W(e2[x->[e1]]) + 
+    if [e2[x->[e1]] = false then 0
+    else W(e2) + W(e3[x->[e1]])+
+        W(loop x = [e3[x->[e1]]] while e2 do e3)
+
+Span is the same
+#+END_SRC
+The work of npow:  
+$W(npow2 n) = S(npow2 n) = O(log n)$
+
+The work of padpow:  
+=W(padpow(n)) = n=
+=S(padpow(n)) = log(n)=
+Padpow is parallel  
+
+The work of red W(red xs[n]) =  O(n)
+The span of red S(red v) = O(log n)
+
+*** Work efficiency
+*A parallel algorithm is said to be work effecient if it has at
+most the same work as the best sequential algorithm*
+
+Is red work efficient? Yes.
+
+Is red efficient? /Troels runs them/
+It isn't as fast as the built-in reduce
+
+** Prefix sums /scans/
+The scan in futhark is inclusive
+
+**** How scans are parallelised
+The simplest scan:
+#+BEGIN_SRC python
+acc = 0
+for i < n:
+    acc = acc + input[i]
+    scanned[i] = acc
+#+END_SRC
+W(n) = S(n) = O(n)
+
+*Work-efficient scan.*
+Includes two passes
+- Up-sweep: Build a balanced binary tree of partial sums stored in every other cell
+- Down-sweep: Use the tree to fill in the blank
+Up sweep values: \[ x^d_i = x^{d+1}_{i-2^{m-d-1}} + x^{d+1}_i \]
+
+We do the down-sweep.  
+Please just check the slides for the explanation. It sucks
+
+=W(wescan) = O(n)=
+=S(wescan) = log(n)=
+
+** Using scans
+*** Filtering
+Using scan to filter. Suppose we wish to remove negative elements from the list.  
+First we calc a flag array
+#+BEGIN_SRC futhark
+  let as = [-1, 2, -3, 4, 5, -6]
+  let keep = map (\a -> if a >= 0 then 1 else 0) as
+  -- [ 0, 1, 0, 1, 1, 0]
+  let offsets1 = scan(+) keep
+  -- [0, 1, 1, 2, 3, 3]
+  let offsets = map(\x -> x - 1)
+  -- [-1, 0, 0, 1, 2, 2]
+
+  let res = scatter (replicate (last offsets1) 0)
+		    (map2 (\i k -> if k == 1 then i else -1) offsets keep)
+		    as
+    
+#+END_SRC
+
+
+*** Radix sort
+Many sorting algos are a poor fit for data parallelism, but /radix sort/ works well  
+Radix-2 works by repeatedly partitioning elements according to one bit at a time,
+while preserving the ordering of the previous steps.
+
+Sort by "digits"
+
+#+BEGIN_SRC futhark
+  -- Sorting xs: [n] u32
+  -- 1 if bit b is set
+  let check_bit b x =
+    (i64.u32 (x >> u32.i32 b)) & 1
+
+
+  let bits = map(check_bit b) xs
+  let bits_neg = map (1-) bits
+  let offs = reduce (x) 0 bits_neg -- How many bits are not set
+
+#+END_SRC
+example
+| b        | 0             |
+| xs       | 0, 1, 2, 3, 4 |
+| bits     | 0, 1, 0, 1, 0 |
+| bits_neg | 1, 0, 1, 0, 1 |
+| offs     | 3             |
+
+continuings
+#+BEGIN_SRC futhark
+  let idxs0 = map2 (*)
+		   bits_neg
+		   (scan (+) 0 bits_neg)
+  let idxs1 = map2(*)
+		  bits
+		  (map (+offs) (scan  (+) 0 bits))
+		
+#+END_SRC
+
+
+| xs               | 0, 1, 2, 3, 4 |
+| bits             | 0, 1, 0, 1, 0 |
+| bits_neg         | 1, 0, 1, 0, 1 |
+| offs             | 3             |
+| idxs0            | 1, 0, 2, 0, 3 |
+| idxs1            | 0, 4, 0, 5, 0 |
+| map2 (+) id0 id1 | 1, 4, 2, 5, 3 |
+
+Finally
+#+BEGIN_SRC futhark
+  let idxs2 = map2 (+) idxs0 idxs1
+  let idxs = map (\x -> x-1) idxs idxs2
+  let xs' = scatter (copy xs idxs xs
+		     in xs
+#+END_SRC
+Work = O(n)
+Span = O(log n)
+
+#+BEGIN_SRC futhark
+  -- Sorting xs: [n] u32
+  -- 1 if bit b is set
+  let check_bit b x =
+    (i64.u32 (x >> u32.i32 b)) & 1
+
+  let radix_step xs b =
+      let bits = map(check_bit b) xs
+      let bits_neg = map (1-) bits
+      let offs = reduce (x) 0 bits_neg -- How many bits are not set
+      let idxs0 = map2 (*)
+		      bits_neg
+		      (scan (+) 0 bits_neg)
+      let idxs1 = map2(*)
+		      bits
+		      (map (+offs) (scan  (+) 0 bits))
+      let idxs2 = map2 (+) idxs0 idxs1
+      let idxs = map (\x -> x-1) idxs idxs2
+      let xs' = scatter (copy xs idxs xs
+		      in xs'
+  let radix_sort [n] (xs: [n]u32): [n]u32 =
+    loop xs for i < 32 do radix_sort_step xs i
+					
+#+END_SRC
