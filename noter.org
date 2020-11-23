@@ -386,3 +386,167 @@ Span = O(log n)
     loop xs for i < 32 do radix_sort_step xs i
 					
 #+END_SRC
+* 23/11 Regular flattening
+In futhark we work on "unzipped" soacs. Every soac accept multiple array inputs and
+produce unzipped results.
+
+We look at
+#+BEGIN_SRC futhark
+  let increment [n][m] (as: [n][m]i32) : [n]i32 =
+    map (\r => map (+2) r) a
+  let sum [n] (a: [n]i32) :
+    reduce (+) 0 a
+  let sumrows [n][m] (as: [n][m]i32) : [n]i32 =
+    map sum as
+	   
+#+END_SRC
+This pattern introduces a seperate intermediate matrix value in memory
+
+If we are mapping a map: =map f (map g a)= is always equivalent to
+=map (f o g) a= /only if/ no side effects are guaranteed. Loop fusion uses this
+
+If we ever do a reduce on a map, this is an efficient pattern.
+
+** Sidebar: Shorthand notaiton for sequences
+$$\bar{z}^{(n)} = z_0, \dots, z_{n-1}$$
+The n may be omitted. A seperator may be implied by context
+$$ f \bar{v} \equiv f v1, \dots, v_n $$
+
+
+When not all terms under the bar ar variant, subscript variant terms with /i/.
+$$ (\bar{[d]v_i}) = ([d] ...$$
+
+Convenient shorthands:
+#+BEGIN_SRC 
+redomap o f _d _xs = reduce o _d (map f _xs)
+scanomap o f _d _xs = scan o _d (map f _xs)
+#+END_SRC
+
+** Nested parallelism
+- GPUs have thousands of simple cores and taking full advantage of their compute power
+  requires tens of thousands of threads.
+- GPU threads are very restricted in what they can do: no stack, no allocation, limited control flow etc.
+- Potential very high performance and lower power usage compared to CPUs.
+- But programming them is /hard/
+
+What follows is a PMPH Recap
+
+SOACs kan be mapped onto a kernel  
+More specifically, a map containing scalar code /or/ a reduce /or/ ... can be made into a kernel.  
+It must be /perfectly nested/ aka the body must contain only one parallel operation.
+
+** Nested parallelism
+Now we have an issue. Futhark permits /nested/ paralllelism, but GPUs need flat parallel kernels.  
+/Solution:/ Have the compiler rewrite program to perfectly nested *maps* containing sequential
+code, or known parallel patterns such as segmented reduction.  
+Example:
+#+BEGIN_SRC futhark
+  map (\xs -> let y = reduce (+) 0 xs
+	      in map (\x -> x + y) xs)
+
+  -- Rewrites to
+  let ys = map (\xs -> reduce (+) 0 xs) xss
+  in map (\xs y -> map (\x -> x + y) xs) xss ys
+      
+    
+#+END_SRC
+Having two perfectly nested parallel maps.
+
+We can do loop fusion backwards via /loop fission/
+The classic rule =map f o map g => map (f o g)= can be used backwards:
+=map (f o g) => map f o map g=
+#+BEGIN_SRC futhark
+
+  let (asss, bss) =
+    map (\(ps) ->
+	   let = map(\(p): i32 ->
+		       let cs = scan (+) 0 (iota p)
+		       let r = reduce (+) 0 cs
+		       in map (+r) ps) ps
+	   let bs = loop ws=ps for i < n do
+		      map (\as w: i32 ->
+			     let d = reduce (+) 0 as
+			     let e = d + w
+			     in 2*e) ass ws
+	   in (ass, bs)) pss
+#+END_SRC
+Start backwards First rewrite:
+
+#+BEGIN_SRC futhark
+
+  let (asss, bss) =
+    map (\(ps) ->
+	   let = map(\(p): i32 ->
+		       let cs = scan (+) 0 (iota p)
+		       let r = reduce (+) 0 cs
+		       in map (+r) ps) ps
+		    in ass) pss
+#+END_SRC
+I cannot follow his rewrites fast enough. Look this up later
+*** TODO Rewrite
+
+** Rules for flattening
+Instead of writing:
+#+BEGIN_SRC futhark
+map (\ps rs ->
+  map (\r -> 
+    map (\p -> e)
+      ps)
+    rs)
+  pss rss
+#+END_SRC
+We write
+#+BEGIN_SRC 
+segmap (<ps, rs \in pss rss>, <r \in rs>, <p \in ps>) e
+#+END_SRC
+
+For any number of maps, we use sugma and a set of angle brackets.
+
+We also have segred Which is a bunch of maps on top of a redomap. Segscan === map map ... scanomap
+
+How we can rewrite SOAC nests to these segmented operations
+
+** Incremental flattening
+We don't want to just flatten the outer loop and use no parallelism. We consider matrix mul
+#+BEGIN_SRC futhark
+  map (\xs ->
+	 map (\ys ->
+		let \s = map (*) xs ys
+		in reduce (+) 0 zs)
+	     (transpose yss))
+      xss
+#+END_SRC
+Three levels of parallelism.
+
+*** How to run this on a GPU
+Full flattening
+#+BEGIN_SRC futhark
+  map (\xs ->
+	 map (\ys ->
+	     redomap (+) (*) 0 xs ys )
+	     (transpose yss))
+      xss
+#+END_SRC
+All parallelism explouted, however we have communication overhead.
+
+Alternatively, only flatten the outer map. Run the redomap in sequence, which
+allows us to optimize the redomap with more advanced stuff such as block tiling.  
+
+There is no size fits all for parallelism
+
+This is where /incremental flattening/. From a single source program, for each parallel construct
+generate multiple semantically equivalent parallelisations, and generate a single program that at
+runtime picks the least parallel that still saturates the hardware.
+- Implemented in Futhark compiler
+- But technique is applicable to any nested parallelism expressed
+with the common Bird-Meertens-style array constructs.
+
+At every level of map-nesting we have two options:
+1. Continue flattening inside the map, exploiting the parallelism there
+2. Sequentialise the map body; exploiting only the parallelism on top
+   
+If we look at matris multiplication, with n x p, and p x m size. We calculate $n * p > t_0$ 
+where $t_0$ is the threshold parameter, which should be auto-tuned on the concrete hardware.
+If we pass the threshold, we pick the lesser parallel version. If we don't we run the fully
+parallel version.
+
