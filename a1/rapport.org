@@ -1,0 +1,141 @@
+* Weekly Assignment 1
+Futhark basics.
+
+/NB/ Unfortunately due to time constraints i have only managed to complete t1 and t2. See comment
+on absalon
+
+All code produced can be found in the attached =src.zip= folder
+
+** Benchmarking setup
+The benchmarks for all of these exercises were run on a desktop computer running linux 5.9.8 with
+proprietary nvidia drivers. The parallel hardware is an Nvidia 1080 ti and the cpu is an intel i5
+hexa-core processor.
+
+** Exercise 1
+*** Simple process
+For exercise 1 i had to implement a simple function that comes as a product of a reduce, and two 
+maps. The whole code for the first two subtasks can be seen in =exercise1.fut= with benchmarks
+included. Below is the process function unwrapped and commented:
+
+#+BEGIN_SRC futhark
+entry process [n] (signal1: [n]i32) (signal2: [n]i32) =
+  reduce i32.max 
+    0 -- Max neutral element
+    (map       -- get the absolute difference
+      i32.abs  -- of signal1 - signal2
+      (map2 (-) signal1 signal2)
+  )
+#+END_SRC
+
+To benchmark the code, and generate runtime graphs, use =make benchmark1=. I have already generated
+the graphs, attached in the src dir as =e1_1.png=.
+
+*** Enhanced process
+For this exercise i expand on the =process= function from before. This time we return both the
+value and the index, using the index as a tie breaker to make the function commutative.  
+
+The code is shown below and in =exercise2.fut=
+
+#+BEGIN_SRC futhark
+entry process_idx [n] (signal1: [n]i64) (signal2: [n]i64) =
+  let max2 (i1, v1) (i2, v2) = 
+    if v1 > v2 then (i1, v1)
+    else if v2 > v1 then (i2, v2)
+    else if i1 < i2 then (i2, v2)
+    else (i1, v1) in
+  reduce max2 (-1, -1) (zip (iota n)
+                            (map i64.abs (map2 (-) signal1 signal2)))
+#+END_SRC
+
+As before, this can be benchmarked using the command =make benchmark2= and the pre-generated image
+and json formatted results can be viewed in the source folder as well.
+
+
+
+** Exercise 2
+For this exercise i implement the Hillis-Steele prefix sum and the blelloch work-efficient scan,
+presented in the lectures. I am given the promise that all tests will run on arrays of size 
+$n = 2^m$ where a function =ilog2= is given to calculate $m$.
+
+The Hillis-Steele sum is implemented like this:
+#+BEGIN_SRC futhark
+let ilog2 (x: i64) = i64.i32 (63 - i64.clz x)
+entry hillis_steele [n] (xs: [n]i32) =
+  let m = ilog2 n
+  in loop xs = copy xs for d in 0..<m do
+    map2 (\x i -> 
+      -- each element x_i in xs, is updated by xs[i] + xs[i-(2**d)]
+      if i - (2**d) < 0 then x
+      else (x + xs[i-(2**d)])
+    ) xs (iota n) 
+#+END_SRC
+As a loop over the parallel map2 operator that transforms the array into it's reduced form.
+
+
+Implementing the work-efficient scan, takes two passes and is implemented below:
+#+BEGIN_SRC futhark
+entry work_efficient [n] (xs: [n]i32) : [n]i32 = 
+  let m = ilog2 n 
+  let upswept = 
+    loop xs = copy xs for d in 1...m do
+      map2 (\x i ->
+        if (i+1) % (2**d) != 0 then x else -- Only operate on every k'th index
+        x + xs[i-(2**(d-1))]
+        ) xs (iota n)
+  let upswept[n-1] = 0
+
+  let downswept =
+    loop xs = upswept for d in (m-1)..(m-2)...0 do
+      map2 (\x i ->
+        let k = (2**d) in
+        if (i+1) % k != 0 then x -- Only operate on every k'th index
+        else
+          -- Right parent
+          if (i+1) % (k*2) != 0 then
+            xs[i+k]
+          else
+          -- or left parent+direct parent
+          x + xs[i-k]
+        ) xs (iota n)
+
+  in downswept
+#+END_SRC
+
+
+We are asked to benchmark and compare these two implementations with the built-in scan operator. To
+perform this test, the whole file can be run using =futhark bench --backend=opencl=. Doing so
+yields the following results:
+#+BEGIN_SRC bash
+$ futhark bench --backend=opencl prefsum.fut
+Compiling prefsum.fut...
+Reporting average runtime of 10 runs for each dataset.
+
+Results for prefsum.fut:hillis_steele:
+[4]i32:             62μs (RSD: 0.232; min: -29%; max: +25%)
+[16]i32:            29μs (RSD: 0.263; min: -13%; max: +78%)
+[256]i32:           53μs (RSD: 0.277; min: -32%; max: +39%)
+[1024]i32:          80μs (RSD: 0.242; min: -21%; max: +35%)
+[4096]i32:          54μs (RSD: 0.117; min: -11%; max: +23%)
+[16384]i32:         64μs (RSD: 0.284; min: -15%; max: +57%)
+
+Results for prefsum.fut:work_efficient:
+[4]i32:             44μs (RSD: 0.376; min: -37%; max: +66%)
+[16]i32:            47μs (RSD: 0.221; min: -18%; max: +44%)
+[256]i32:          104μs (RSD: 0.102; min: -15%; max: +14%)
+[1024]i32:         118μs (RSD: 0.627; min: -38%; max: +179%)
+[4096]i32:         125μs (RSD: 0.091; min: -12%; max: +18%)
+[16384]i32:        142μs (RSD: 0.088; min: -12%; max: +13%)
+
+Results for prefsum.fut:built_in_sum:
+[4]i32:             14μs (RSD: 0.043; min:  -6%; max:  +9%)
+[16]i32:            14μs (RSD: 0.032; min:  -7%; max:  +7%)
+[256]i32:           14μs (RSD: 0.022; min:  -6%; max:  +1%)
+[1024]i32:          14μs (RSD: 0.034; min:  -3%; max:  +4%)
+[4096]i32:          15μs (RSD: 0.041; min:  -5%; max:  +8%)
+[16384]i32:         16μs (RSD: 0.043; min:  -4%; max:  +9%)
+#+END_SRC
+We see that the hillis-steele scan is the fastest of our two implementations, with the largest
+dataset being more than twice as fast when implemented using hillis-steele. None of our functions
+run faster than the futhark included scan.
+
+

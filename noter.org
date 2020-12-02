@@ -550,3 +550,92 @@ where $t_0$ is the threshold parameter, which should be auto-tuned on the concre
 If we pass the threshold, we pick the lesser parallel version. If we don't we run the fully
 parallel version.
 
+* TODO 30/11 
+* 02/12 ISPC
+** SIMD
+Simd. Same instruction, multiple data.  
+In our notation, SIMD is regular and flat data parallellism on
+vectors of static size.  
+
+NB: Simd is cheap
+- Already part of the cpu
+- Using an ins has zero latency
+  - Compared to GPUs which have huge overhead
+
+NB2: SIMD is not multithreading.
+
+In principle we can use SIMD whenever we have independent operations with the
+same operator occur.
+
+We can vectorise by strip-mining
+#+BEGIN_SRC c
+for (int i = 0; i < n; i++){
+  x[i] *= 2;
+}
+// Becomes
+
+for(int ii = 0; i < n; i += 4){
+  // This gets unrolled and vectorid
+  for(int i = ii; i < ii + 4; i++)
+  {
+    x[i] *= 2;
+  }
+}
+
+#+END_SRC
+
+*** An issue comes up. Vectorising scalar functions
+We use masking just like in numpy. Turn control flow into data flow.  
+- Doing this by hand gets tiring
+
+** Auto-vectorisation
+Write ordinary C code and hope that a sufficiently smart compiler
+can figure out what you mean and make use of whatever instructions
+your cpu supports.
+
+Its hard in C. Intel tried. They introduced a Pragma. This is an admission
+of "This problem is hard"
+
+Matt pharr(ispc dude) came up with /SPMD/. Essentially the model used by
+CUDA. 
+- Multiple instancels of program is running
+- Groyp of running instances is called a /gang/
+
+We act as if every element in the inputs have their own program instance.
+
+** COMMENT ISPC
+- A variant of C
+- A low-level parallel language
+- Not guaranteed to be deterministic
+- A compiler with only a few compiler optimisations
+
+Example of using the right programming model. We mostly focus on high-level languages
+but this is very low yet still automagically parallel
+
+- Call to ispc spawns gang of program instances
+- All instances are done when function returns.
+- Gang size is SIMD width or a small multiple
+- Lockstep execution
+- Each instance gets a copy of each non-=uniform= variable
+
+Example
+#+BEGIN_SRC c
+  export void f(uniform int n,
+		uniform float as[]) {
+    for (int i = programIndex;
+	 i < n;
+	 i += programCount){
+      float a = as[i];
+      // No barrier necessary. All in lockstep
+      as[i] = a*2
+    }
+  }
+
+
+#+END_SRC
+
+ispc is concerned with real-world performance, not purity.
+We might mess up and can create systems that break ispc. We just won't
+in production.
+
+
