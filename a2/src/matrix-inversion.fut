@@ -22,9 +22,14 @@ let gaussian_elimination [n] [m] (A: [m][n]f32): [m][n]f32 =
                              irow A[j])
 
 let ones_row (n: i64) (r: i64) : [n]f32 =
+  map (\i -> if i == r then 1.0 else 0.0) (iota n)
 
 
-let matrix_inverse [n] (A: [n][n]f32): [n][n]f32 =
+let matrix_inverse [n] (A: [n][n]f32) : [n][n]f32 =
   let n2 = n+n
-  let AI = map (\row ->
-                    concat_to n2 row 
+  let I  = map (\i -> ones_row n i) (iota n)
+  let AI = map2 (\row IRow ->
+                    concat_to n2 row IRow
+                ) A I
+  let inv = gaussian_elimination AI
+  in inv[:,n:] :> [n][n]f32
