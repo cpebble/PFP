@@ -16,6 +16,15 @@
 -- random input {[4096]i32}
 -- random input {[16384]i32}
 
+-- ==
+-- entry: built_in_sum
+-- random input {[4]i32}
+-- random input {[16]i32}
+-- random input {[256]i32}
+-- random input {[1024]i32}
+-- random input {[4096]i32}
+-- random input {[16384]i32}
+
 let ilog2 (x: i64) = i64.i32 (63 - i64.clz x)
 entry hillis_steele [n] (xs: [n]i32) =
   let m = ilog2 n
@@ -52,3 +61,6 @@ entry work_efficient [n] (xs: [n]i32) : [n]i32 =
         ) xs (iota n)
 
   in downswept
+
+entry built_in_sum [n] (xs: [n]i32) =
+  scan (+) 0 xs
