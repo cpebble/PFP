@@ -1,17 +1,11 @@
 -- Flattening If-Then-Else nested inside a map
 -- ==
--- compiled input { [false,true,false,true]
---                  [3i64,4,2,1]
---                  [1i32,2,3,4,5,6,7,8,9,10]
--- }
+-- compiled input @ ifBench.tiny
 -- output { [3i64,4,2,1] [2i32,4,6,5,6,7,8,16,18,11] }
--- compiled input { 
--- [true, false, true, false, true]
--- [2i64, 2, 3, 3, 2]
--- [2i32, 1, 2, 1, 3, 2, 1, 3, 2, 1, 2, 1]
--- }
--- output { [2, 2, 3, 3, 2i64] [3i32, 2, 4, 2, 4, 3, 2, 6, 4, 2, 3, 2] }
--- compiled random input { [100]bool [100]i64 [10000000]i32 }
+-- compiled input @ ifBench.small
+-- compiled input @ ifBench.medium
+-- compiled input @ ifBench.large
+-- compiled input @ ifBench.huge
 
 let sgmscan 't [n] (op: t->t->t) (ne: t) (flg : [n]i64) (arr : [n]t) : [n]t =
   let flgs_vals =
@@ -84,25 +78,17 @@ let mkII2 [m] (shp: [m]i64) : []i32 =
 -- Test input: [[1,2,3],[4,5,6,7], [8,9], [10]]
 -- Test shape: [3, 4, 2, 1
 -- Test bools: [F, T, F, T]
-let flatIf [n][m] (f: i32 -> i32) (g: i32->i32) (bs: [m]bool) (S1_xss: [m]i64, D_xss: [n]i32) = --: ([]i64, []i32) =
-  let (spl, iinds) = partition2 bs 0 (indices bs)
-  let (s_xss_then, s_xss_else) = split spl (map (\ii -> S1_xss[ii]) iinds)
-  
+let flatIf [n][m] (f: i32 -> i32) (g: i32->i32) (bs: [m]bool) (S1_xss: [m]i64, D_xss: [n]i32) : ([]i64, []i32) =
   -- Make a mask
   let fl_arr = mkFlagArray S1_xss 0 (replicate m 1) :> [n]i32 -- [1, 0, 0, 1, 0, 0, 0, 1, 0, 1]
+  -- Map each irregular subarray to the boolean
   let fl_inds = scan (+) 0 fl_arr |> map (\x -> x-1)
+  -- Use that to make a mask
   let fl_mask = map (\i -> bs[i]) fl_inds
+  -- Map the function
   let res = map2 (\b x -> if b then f x else g x) fl_mask D_xss
   in (S1_xss, res)
 
-  --let (brk, Dp_xss) = partition2 fl_mask 0 D_xss
-  --let (D_xss_th, D_xss_el) = split brk Dp_xss
-
-  --let (brk, Dp_xss) = partition2 fl_mask 0 D_xss
-  --let (D_xss_th, D_xss_el) = split brk Dp_xss
-  --let D_res_th = map f D_xss_th
-  --let D_res_el = map g D_xss_el
-  --in (D_xss_th, D_xss_el)
 
 
 

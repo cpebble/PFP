@@ -33,3 +33,6 @@ let matrix_inverse [n] (A: [n][n]f32) : [n][n]f32 =
                 ) A I
   let inv = gaussian_elimination AI
   in inv[:,n:] :> [n][n]f32
+
+let main [k] [n] (Mats: [k][n][n]f32) : [k][n][n]f32 =
+  map matrix_inverse Mats
