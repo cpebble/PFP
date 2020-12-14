@@ -1,0 +1,204 @@
+% Created 2020-12-10 Thu 22:47
+% Intended LaTeX compiler: pdflatex
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{grffile}
+\usepackage{longtable}
+\usepackage{wrapfig}
+\usepackage{rotating}
+\usepackage[normalem]{ulem}
+\usepackage{amsmath}
+\usepackage{textcomp}
+\usepackage{amssymb}
+\usepackage{capt-of}
+\usepackage{hyperref}
+\author{Christian Påbøl}
+\date{\today}
+\title{Weekly 3}
+\hypersetup{
+ pdfauthor={Christian Påbøl},
+ pdftitle={Weekly 3},
+ pdfkeywords={},
+ pdfsubject={},
+ pdfcreator={Emacs 27.1 (Org mode 9.3)}, 
+ pdflang={English}}
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+
+\section{ISPC}
+\label{sec:org4cc76c5}
+For the first part of the weekly assignment, we program with the
+Intel Implicit SPMD Program Compiler, and use the \href{https://ispc.github.io/ispc.html}{user guide} for reference. 
+To run the assignments and get a runtime comparison, i created a make target
+which can be run by using \texttt{make assignment} from the \texttt{src/ispc/} directory.
+\subsection{Scan}
+\label{sec:org702a113}
+First, we try to implement a parallel scan:
+\begin{verbatim}
+export void scan_ispc(uniform float output[], 
+		      uniform float input[],
+		      uniform int n) {
+    foreach(i = 0 ... n){
+    // Exclusive scan
+	float in_ = input[i];
+	if (programIndex == 0 && i > 0)
+	    in_ += output[i-1];
+
+	float tmp = exclusive_scan_add(in_);
+	output[i] = shift(tmp, 1);
+	if (programIndex == programCount - 1){
+	    output[i] = tmp + input[i];
+	}
+    }
+}
+\end{verbatim}
+This is simple enough, since an inclusive scan is just a shifted exclusive scan.
+This is also where we encounter the first differences between ispc and c. When
+calculating the scan, we have to account for \(n > programCount\) and carry the
+previous output along with us.  
+This will be the only task where the C compiler outdoes us, since it automagically
+vectorizes the sequential for loop and generates parallel machine code.
+
+\subsection{Pack}
+\label{sec:org3628ddb}
+Pack was similarly not too tricky:
+
+\begin{verbatim}
+export uniform int pack_ispc(uniform int output[],
+			     uniform int input[],
+			     uniform int n) {
+  uniform int m = 0;
+  output[0] = input[0];
+  foreach (i = 0 ... n) {
+    float j = input[i];
+    int keep = j != input[i-1];
+    int offset = exclusive_scan_add(keep);
+    if(!keep){
+	offset = programCount -1;
+    }
+    output[m + offset] = j;
+    m += reduce_add(keep);
+  }
+  return m;
+}
+
+\end{verbatim}
+This code is heavily based upon the included \texttt{filter.ispc}, except this
+time, the \texttt{keep} bool records whether we have found a new unique integer.  
+This time, we beat the sequential C compiler, and the code runs 1.5-2 times
+faster than its sequential counterpart.
+
+\subsection{Run-length encoding}
+\label{sec:orgbbe8b2b}
+This is the most tricky problem of the ISPC problems.
+
+\begin{verbatim}
+ 1  export uniform int rle_ispc(uniform int output[],
+ 2  			    uniform int input[], 
+ 3  			    uniform int n) {
+ 4      // While to handle elements
+ 5      uniform int c = 0; // Counting offset
+ 6      uniform int m;
+ 7      uniform int cur;
+ 8      uniform int encoded = 0; // use this to handle outputting
+ 9      while(c < n){
+10  	cur = input[c]; // Current element
+11  	m = c + 1;
+12  	// While to handle counting
+13  	while(m <= (n-programCount)){
+14  	    // Increment count here
+15  	    int element = input[m+programIndex];
+16  	    if(all(element == cur)){ // If all elements match
+17  		m += programCount; 
+18  	    } else {
+19  		break;
+20  	    }
+21  	}
+22  	// Once we break we need to check the remaining in the sequence
+23  	// A bit hackish count but who cares
+24  	while(m < n && input[m] == cur){
+25  	    m++;
+26  	}
+27  	// Handle writing
+28  	output[encoded*2] = m - c;
+29  	output[encoded*2 + 1] = cur;
+30  	encoded += 1;
+31  	c = m;
+32      }
+33      return encoded*2;
+34  }
+\end{verbatim}
+
+To explain this i go through it section by section
+\begin{verbatim}
+1  export uniform int rle_ispc(uniform int output[],
+2  			    uniform int input[], 
+3  			    uniform int n) {
+4      // While to handle elements
+5      uniform int c = 0; // Counting offset
+6      uniform int m;
+7      uniform int cur;
+8      uniform int encoded = 0; // use this to handle outputtig
+\end{verbatim}
+This just sets up the values we need to compute
+
+\begin{verbatim}
+ 9  while(c < n){
+10      cur = input[c]; // Current element
+11      m = c + 1;
+\end{verbatim}
+The outer while loop represents the sequence, one iteration per. We start off
+a sequence by loading the element in, and choosing where to start. Here, we start
+off by immediately counting the value in \texttt{input[c]}. \texttt{m} will be used to keep
+track of where we are in the sequence and the final count.
+
+\begin{verbatim}
+12  // While to handle counting
+13  while(m <= (n-programCount)){
+14      // Increment count here
+15      int element = input[m+programIndex];
+16      if(all(element == cur)){ // If all elements match
+17  	m += programCount; 
+18      } else {
+19  	break;
+20      }
+21  }
+\end{verbatim}
+This snippet loads a vector into memory. If all elements in that vector are the same
+as the current, then we can just skip ahead to the next vector. This is where the parallelism
+comes into play. \texttt{all(element = cur)} Boils down to a vector compare, and allows us to check
+8\footnote{on my machine a vector is 8 wide} thus gaining up to 8x speedup. Unfortunately we can't
+expect all our sequences to be multiples of ProgramCount, therefore we want to check the 
+tail-end of our sequence sequentially.
+\begin{verbatim}
+22  // Once we break we need to check the remaining in the sequence
+23  // A bit hackish count but who cares
+24  while(m < n && input[m] == cur){
+25      m++;
+26  }
+\end{verbatim}
+Quite simply, this loops m till the sequence breaks, and is guaranteed to run less than
+\texttt{programCount} iterations. 
+\begin{verbatim}
+27  	// Handle writing
+28  	output[encoded*2] = m - c;
+29  	output[encoded*2 + 1] = cur;
+30  	encoded += 1;
+31  	c = m;
+32      }
+33      return encoded*2;
+34  }
+\end{verbatim}
+Finally, knowing where our sequence starts(\texttt{c}) and where it ends(\texttt{m}) we write it out
+to memory, and increase our counts, setting the next sequence start to be the end of our current
+sequence.
+
+\section{The Halide part}
+\label{sec:orga4dd610}
+Unfortunately, i didn't have time to complete the halide part of this assignment.
+\end{document}

@@ -1,0 +1,169 @@
+#+TITLE:Weekly 3
+#+AUTHOR:Christian Påbøl
+
+* ISPC
+For the first part of the weekly assignment, we program with the
+Intel Implicit SPMD Program Compiler, and use the [[https://ispc.github.io/ispc.html][user guide]] for reference. 
+To run the assignments and get a runtime comparison, i created a make target
+which can be run by using =make assignment= from the =src/ispc/= directory.
+** Scan
+   First, we try to implement a parallel scan:
+#+BEGIN_SRC c
+export void scan_ispc(uniform float output[], 
+                      uniform float input[],
+		      uniform int n) {
+    foreach(i = 0 ... n){
+    // Exclusive scan
+        float in_ = input[i];
+        if (programIndex == 0 && i > 0)
+            in_ += output[i-1];
+
+        float tmp = exclusive_scan_add(in_);
+        output[i] = shift(tmp, 1);
+        if (programIndex == programCount - 1){
+            output[i] = tmp + input[i];
+        }
+    }
+}
+#+END_SRC
+This is simple enough, since an inclusive scan is just a shifted exclusive scan.
+This is also where we encounter the first differences between ispc and c. When
+calculating the scan, we have to account for $n > programCount$ and carry the
+previous output along with us.  
+This will be the only task where the C compiler outdoes us, since it automagically
+vectorizes the sequential for loop and generates parallel machine code.
+
+** Pack
+Pack was similarly not too tricky:
+
+#+BEGIN_SRC c
+export uniform int pack_ispc(uniform int output[],
+                             uniform int input[],
+			     uniform int n) {
+  uniform int m = 0;
+  output[0] = input[0];
+  foreach (i = 0 ... n) {
+    float j = input[i];
+    int keep = j != input[i-1];
+    int offset = exclusive_scan_add(keep);
+    if(!keep){
+        offset = programCount -1;
+    }
+    output[m + offset] = j;
+    m += reduce_add(keep);
+  }
+  return m;
+}
+
+#+END_SRC
+This code is heavily based upon the included =filter.ispc=, except this
+time, the =keep= bool records whether we have found a new unique integer.  
+This time, we beat the sequential C compiler, and the code runs 1.5-2 times
+faster than its sequential counterpart.
+
+** Run-length encoding
+This is the most tricky problem of the ISPC problems.
+
+#+BEGIN_SRC c -n
+export uniform int rle_ispc(uniform int output[],
+                            uniform int input[], 
+                            uniform int n) {
+    // While to handle elements
+    uniform int c = 0; // Counting offset
+    uniform int m;
+    uniform int cur;
+    uniform int encoded = 0; // use this to handle outputting
+    while(c < n){
+        cur = input[c]; // Current element
+        m = c + 1;
+        // While to handle counting
+        while(m <= (n-programCount)){
+            // Increment count here
+            int element = input[m+programIndex];
+            if(all(element == cur)){ // If all elements match
+                m += programCount; 
+            } else {
+                break;
+            }
+        }
+        // Once we break we need to check the remaining in the sequence
+        // A bit hackish count but who cares
+        while(m < n && input[m] == cur){
+            m++;
+        }
+        // Handle writing
+        output[encoded*2] = m - c;
+        output[encoded*2 + 1] = cur;
+        encoded += 1;
+        c = m;
+    }
+    return encoded*2;
+}
+#+END_SRC
+
+To explain this i go through it section by section
+#+BEGIN_SRC c -n
+export uniform int rle_ispc(uniform int output[],
+                            uniform int input[], 
+                            uniform int n) {
+    // While to handle elements
+    uniform int c = 0; // Counting offset
+    uniform int m;
+    uniform int cur;
+    uniform int encoded = 0; // use this to handle outputtig
+#+END_SRC
+This just sets up the values we need to compute
+
+#+BEGIN_SRC c +n
+    while(c < n){
+        cur = input[c]; // Current element
+        m = c + 1;
+#+END_SRC
+The outer while loop represents the sequence, one iteration per. We start off
+a sequence by loading the element in, and choosing where to start. Here, we start
+off by immediately counting the value in =input[c]=. =m= will be used to keep
+track of where we are in the sequence and the final count.
+
+#+BEGIN_SRC c +n
+        // While to handle counting
+        while(m <= (n-programCount)){
+            // Increment count here
+            int element = input[m+programIndex];
+            if(all(element == cur)){ // If all elements match
+                m += programCount; 
+            } else {
+                break;
+            }
+        }
+#+END_SRC
+This snippet loads a vector into memory. If all elements in that vector are the same
+as the current, then we can just skip ahead to the next vector. This is where the parallelism
+comes into play. =all(element = cur)= Boils down to a vector compare, and allows us to check
+8[fn::on my machine a vector is 8 wide] thus gaining up to 8x speedup. Unfortunately we can't
+expect all our sequences to be multiples of ProgramCount, therefore we want to check the 
+tail-end of our sequence sequentially.
+#+BEGIN_SRC c +n
+        // Once we break we need to check the remaining in the sequence
+        // A bit hackish count but who cares
+        while(m < n && input[m] == cur){
+            m++;
+        }
+#+END_SRC
+Quite simply, this loops m till the sequence breaks, and is guaranteed to run less than
+=programCount= iterations. 
+#+BEGIN_SRC c +n
+        // Handle writing
+        output[encoded*2] = m - c;
+        output[encoded*2 + 1] = cur;
+        encoded += 1;
+        c = m;
+    }
+    return encoded*2;
+}
+#+END_SRC
+Finally, knowing where our sequence starts(=c=) and where it ends(=m=) we write it out
+to memory, and increase our counts, setting the next sequence start to be the end of our current
+sequence.
+
+* The Halide part
+Unfortunately, i didn't have time to complete the halide part of this assignment.
