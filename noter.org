@@ -639,3 +639,90 @@ We might mess up and can create systems that break ispc. We just won't
 in production.
 
 
+* TODO 07/12 
+* 09/12 automatic differentiation
+Han starter forelæsningen ved at gå igennem differencieringsregler
+...
+
+** Intuition on differentiating a program
+We consider $f_i: R^{n_{i-1}} \rightarrow R^{n_i}$ for $i = 1 ... m$ and program $P$
+defined as the composition: fm o fm-1 o ... o f2 o f1.
+The formula for deriving p
+
+$$ j_p(x) = j_{fm}(f_{m-1}(...f1(x))) \cdot ... \cdot j_{f2}(f_1(x))\cdot j_{f1}(x) $$
+Since $j$ is a matrix we need to consider, should we compute $j_p(x)$ from right-to-left or from left-to-right
+
+By going right-to-left we end with a vectors multiplied going left, instead of 
+going right which results in matrix multiplications.
+Formal notation
+
+Forward mode
+- When the length of the input is leq or comparable to the length of the output
+  i.e. $n_0 \leq n_m$ or $n_0 \approx n_m$
+- The jacobian is computed in th same time as $f_i(x)$
+
+Reverse mode
+- When the length of the output is significantly less than the length of the input
+- Typically the common case for AI(many inputs, 1 or a few outputs)
+- $f_{m-1} ( ...f_1(x))$ needs to be computed before we start, hence we need
+  to save every intermediate variable since they could occur in the jacobian
+
+** What is automatic differentiation
+Baydin et al 2018.  
+Take some code, e.g.
+#+BEGIN_SRC 
+f(x):
+  v = x
+  for i = 1 to 3:
+    v = 4*v*(1-v)
+  return v
+#+END_SRC
+
+If we do mathematical differentiation, we get a huge boring "exact" function
+
+If we do approx diff, we get
+#+BEGIN_SRC 
+f'(x):
+  h = 0.000001
+  return (f(x+h) f f(x)) /h
+#+END_SRC
+(Like in htx)
+
+If we do AD
+#+BEGIN_SRC 
+f'(x):
+  (v,dv) = (x,1)
+  for i = 1 to 3
+    (v, dv) = (4*v*(1-v), 4*dv-8*v*dv)
+  return (v, dv)
+#+END_SRC
+(Calculates both f(x) and the derivative)
+
+** Forward mode intuition
+Running example:
+$$y = f(x_1, x_2) = ln(x_1) + x_1 \cdot x_2 - sin(x_2)$$
+
+Forward mode AD example with y = f(x1, x2) = ln(x1) + x1x2 - sin(x2) evaluated
+at (x1, x2) = (2, 5) and setting ^x_1 = 1(the deriv) to compute pdiff on x1
+
+The formal trace:
+| Primal                   |       | Derivative                   |               |
+|--------------------------+-------+------------------------------+---------------|
+| v_01 = x1                |     2 | ^v_-1 = x1                   |             1 |
+| x2                       |     5 | ^v_0 = x2                    |             0 |
+| v1 = ln v_-1             |  ln 2 | ^v_-1 / v_-1                 |           1/2 |
+| v2           = v_-1 x v0 | 2 x 5 | ^v2 = ^v-1 x v0 + ^v0 x v_-1 | 1 x 5 + 0 x 2 |
+
+*** Generalization to multiple dims
+assuming $f : R^n \rightarrow R^n$
+- running AD requires n runs of the code,
+- which run i initialises x = e_i the i-th unit vector
+- and computes one column of the jacobian matrix
+
+Essentially a map op over the n unit vectors, where the unnamed function implements
+forward mode.
+
+** Reverse mode: Intuition
+Phase 1: Original code forward, populating intermediate vars $v_i$  
+Phase 2: derivatives are calculated by propagating adjoints in reverse
+- Computes a row of the jacobian at a time
