@@ -726,3 +726,4 @@ forward mode.
 Phase 1: Original code forward, populating intermediate vars $v_i$  
 Phase 2: derivatives are calculated by propagating adjoints in reverse
 - Computes a row of the jacobian at a time
+* 14/12 Differentiating a program

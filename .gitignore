@@ -57,3 +57,5 @@ ltximg/
 pfp-master/
 data/
 course-git/
+*.huge
+*.large
